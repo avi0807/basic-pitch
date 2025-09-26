@@ -111,9 +111,11 @@ class FlattenFreqCh(tf.keras.layers.Layer):
     """
 
     def call(self, x: tf.Tensor) -> tf.Tensor:
-        shapes = K.int_shape(x)
-        batch_size = tf.shape(x)[0]
-        time_dim = shapes[1]
-        freq_dim = shapes[2]
-        ch_dim = shapes[3]
-        return tf.reshape(x, [batch_size, time_dim, freq_dim * ch_dim])
+        """Reshape a 4D tensor to a 3D tensor by collapsing the frequency and channel dimensions"""
+        # Get the dynamic shape of the input tensor
+        shape = tf.shape(x)
+        batch_size, time_dim, freq_dim, ch_dim = shape[0], shape[1], shape[2], shape[3]
+
+        # Construct the new shape for reshaping
+        new_shape = tf.stack([batch_size, time_dim, freq_dim * ch_dim])
+        return tf.reshape(x, new_shape)

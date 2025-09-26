@@ -184,10 +184,11 @@ def get_cqt(inputs: tf.Tensor, n_harmonics: int, use_batchnorm: bool) -> tf.Tens
         bins_per_octave=12 * CONTOURS_BINS_PER_SEMITONE,
     )(x)
     x = signal.NormalizedLog()(x)
-    x = tf.expand_dims(x, -1)
+    x = tf.keras.layers.Reshape(target_shape=x.shape[1:] + (1,))(x)
     if use_batchnorm:
         x = tfkl.BatchNormalization()(x)
     return x
+
 
 
 def model(
@@ -197,123 +198,82 @@ def model(
     n_filters_notes: int = 32,
     no_contours: bool = False,
 ) -> tf.keras.Model:
-    """Basic Pitch's model implementation.
+    """Basic Pitch's model implementation, updated for modern TensorFlow."""
 
-    Args:
-        n_harmonics: The number of harmonics to use in the harmonic stacking layer.
-        n_filters_contour: Number of filters for the contour convolutional layer.
-        n_filters_onsets: Number of filters for the onsets convolutional layer.
-        n_filters_notes: Number of filters for the notes convolutional layer.
-        no_contours: Whether or not to include contours in the output.
-    """
-    # input representation
-    inputs = tf.keras.Input(shape=(AUDIO_N_SAMPLES, 1))  # (batch, time, ch)
+    # --- Constants for model architecture ---
+    CONTOUR_KERNEL_SIZE_1 = (5, 5)
+    CONTOUR_KERNEL_SIZE_2 = (3, 39)
+    CONTOUR_KERNEL_SIZE_3 = (5, 5)
+    CONTOUR_FILTERS_2 = 8
+    NOTES_KERNEL_SIZE_1 = (7, 7)
+    NOTES_KERNEL_SIZE_2 = (7, 3)
+    ONSET_KERNEL_SIZE_1 = (5, 5)
+    ONSET_KERNEL_SIZE_2 = (3, 3)
+    
+    # --- Input and CQT Layer ---
+    inputs = tf.keras.Input(shape=(None, 1), name="input_layer")
     x = get_cqt(inputs, n_harmonics, True)
 
     if n_harmonics > 1:
         x = nn.HarmonicStacking(
-            CONTOURS_BINS_PER_SEMITONE,
-            [0.5] + list(range(1, n_harmonics)),
-            N_FREQ_BINS_CONTOURS,
+            CONTOURS_BINS_PER_SEMITONE, [0.5] + list(range(1, n_harmonics)), N_FREQ_BINS_CONTOURS
         )(x)
     else:
-        x = nn.HarmonicStacking(
-            CONTOURS_BINS_PER_SEMITONE,
-            [1],
-            N_FREQ_BINS_CONTOURS,
-        )(x)
+        x = nn.HarmonicStacking(CONTOURS_BINS_PER_SEMITONE, [1], N_FREQ_BINS_CONTOURS)(x)
 
-    # contour layers - fully convolutional
-    x_contours = tfkl.Conv2D(
-        n_filters_contour,
-        CONTOUR_KERNEL_SIZE_1,
-        padding="same",
-        kernel_initializer=_initializer(),
-        kernel_constraint=_kernel_constraint(),
-    )(x)
+    # --- Instrument Head (Your Custom Pathway) ---
+    x_instrument = tfkl.Conv2D(32, (3, 3), padding="same", activation="relu", name="instrument_conv1")(x)
+    x_instrument = tfkl.BatchNormalization(name="instrument_bn1")(x_instrument)
+    x_instrument = tfkl.MaxPool2D(pool_size=(2, 2), name="instrument_pool1")(x_instrument)
+    x_instrument = tfkl.Conv2D(64, (3, 3), padding="same", activation="relu", name="instrument_conv2")(x_instrument)
+    x_instrument = tfkl.BatchNormalization(name="instrument_bn2")(x_instrument)
+    x_instrument = tfkl.GlobalAveragePooling2D(name="instrument_gap")(x_instrument)
+    x_instrument = tfkl.Dense(17, activation="softmax", name="instruments")(x_instrument)
 
+    # --- Contour Pathway ---
+    contours_name = "contours"
+    x_contours = tfkl.Conv2D(n_filters_contour, CONTOUR_KERNEL_SIZE_1, padding="same", kernel_initializer=_initializer(), kernel_constraint=_kernel_constraint())(x)
     x_contours = tfkl.BatchNormalization()(x_contours)
     x_contours = tfkl.ReLU()(x_contours)
-
-    x_contours = tfkl.Conv2D(
-        CONTOUR_FILTERS_2,
-        CONTOUR_KERNEL_SIZE_2,
-        padding="same",
-        kernel_initializer=_initializer(),
-        kernel_constraint=_kernel_constraint(),
-    )(x)
-
+    x_contours = tfkl.Conv2D(CONTOUR_FILTERS_2, CONTOUR_KERNEL_SIZE_2, padding="same", kernel_initializer=_initializer(), kernel_constraint=_kernel_constraint())(x_contours)
     x_contours = tfkl.BatchNormalization()(x_contours)
     x_contours = tfkl.ReLU()(x_contours)
+    x_contours_pre = tfkl.Conv2D(1, CONTOUR_KERNEL_SIZE_3, padding="same", activation="sigmoid", kernel_initializer=_initializer(), kernel_constraint=_kernel_constraint(), name="contours-reduced")(x_contours)
+    x_contours = nn.FlattenFreqCh(name=contours_name)(x_contours_pre)
+    x_contours_reduced = tfkl.Reshape(target_shape=x_contours.shape[1:] + (1,))(x_contours)
 
-    if not no_contours:
-        contour_name = "contour"
-        x_contours = tfkl.Conv2D(
-            1,
-            CONTOUR_KERNEL_SIZE_3,
-            padding="same",
-            activation="sigmoid",
-            kernel_initializer=_initializer(),
-            kernel_constraint=_kernel_constraint(),
-            name="contours-reduced",
-        )(x_contours)
-        x_contours = nn.FlattenFreqCh(name=contour_name)(x_contours)  # contour output
+    # --- Note Pathway ---
+    notes_name = "notes"
+    x_notes = tfkl.Conv2D(n_filters_notes, NOTES_KERNEL_SIZE_1, padding="same", kernel_initializer=_initializer(), kernel_constraint=_kernel_constraint())(x_contours_reduced)
+    x_notes = tfkl.ReLU()(x_notes)
+    # Use AveragePooling to downsample the frequency dimension from 264 to 88
+    x_notes = tfkl.AveragePooling2D(pool_size=(1, 3))(x_notes)
+    x_notes_pre = tfkl.Conv2D(1, NOTES_KERNEL_SIZE_2, padding="same", kernel_initializer=_initializer(), kernel_constraint=_kernel_constraint(), activation="sigmoid")(x_notes)
+    x_notes_pre = tfkl.Lambda(
+        lambda x: tf.image.resize(x, (tf.shape(inputs)[1] // 512, 88))
+    )(x_notes_pre)
+    x_notes = nn.FlattenFreqCh(name=notes_name)(x_notes_pre)
 
-        # reduced contour output as input to notes
-        x_contours_reduced = tf.expand_dims(x_contours, -1)
-    else:
-        x_contours_reduced = x_contours
-
-    x_contours_reduced = tfkl.Conv2D(
-        n_filters_notes,
-        NOTES_KERNEL_SIZE_1,
-        padding="same",
-        strides=NOTES_STRIDES_1,
-        kernel_initializer=_initializer(),
-        kernel_constraint=_kernel_constraint(),
-    )(x_contours_reduced)
-    x_contours_reduced = tfkl.ReLU()(x_contours_reduced)
-
-    # note output layer
-    note_name = "note"
-    x_notes_pre = tfkl.Conv2D(
-        1,
-        NOTES_KERNEL_SIZE_2,
-        padding="same",
-        kernel_initializer=_initializer(),
-        kernel_constraint=_kernel_constraint(),
-        activation="sigmoid",
-    )(x_contours_reduced)
-    x_notes = nn.FlattenFreqCh(name=note_name)(x_notes_pre)
-
-    # onset output layer
-
-    # onsets - fully convolutional
-    x_onset = tfkl.Conv2D(
-        n_filters_onsets,
-        ONSET_KERNEL_SIZE_1,
-        padding="same",
-        strides=ONSET_STRIDES_1,
-        kernel_initializer=_initializer(),
-        kernel_constraint=_kernel_constraint(),
-    )(x)
+    # --- Onset Pathway ---
+    onsets_name = "onsets"
+    x_onset = tfkl.Conv2D(n_filters_onsets, ONSET_KERNEL_SIZE_1, padding="same", kernel_initializer=_initializer(), kernel_constraint=_kernel_constraint())(x)
     x_onset = tfkl.BatchNormalization()(x_onset)
     x_onset = tfkl.ReLU()(x_onset)
+    # Use AveragePooling to downsample the frequency dimension from 264 to 88
+    x_onset = tfkl.AveragePooling2D(pool_size=(1, 3))(x_onset)
     x_onset = tfkl.Concatenate(axis=3, name="concat")([x_notes_pre, x_onset])
-    x_onset = tfkl.Conv2D(
-        1,
-        ONSET_KERNEL_SIZE_2,
-        padding="same",
-        activation="sigmoid",
-        kernel_initializer=_initializer(),
-        kernel_constraint=_kernel_constraint(),
+    x_onset = tfkl.Conv2D(1, ONSET_KERNEL_SIZE_2, padding="same", activation="sigmoid", kernel_initializer=_initializer(), kernel_constraint=_kernel_constraint())(x_onset)
+    x_onset = tfkl.Lambda(
+        lambda x: tf.image.resize(x, (tf.shape(inputs)[1] // 512, 88))
     )(x_onset)
+    x_onset = nn.FlattenFreqCh(name=onsets_name)(x_onset)
 
-    onset_name = "onset"
-    x_onset = nn.FlattenFreqCh(
-        name=onset_name,
-    )(x_onset)
-
-    outputs = {"onset": x_onset, "contour": x_contours, "note": x_notes}
+    # --- Final Outputs ---
+    outputs = {
+        "notes": x_notes,
+        "onsets": x_onset,
+        "contours": x_contours,
+        "instruments": x_instrument,
+    }
 
     return tf.keras.Model(inputs=inputs, outputs=outputs)
