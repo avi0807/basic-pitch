@@ -166,7 +166,7 @@ def train():
     SAMPLE_RATE = 16000
     DURATION = 10.0
     HOP_LENGTH = 256
-    TARGET_LEARNING_RATE = 5e-6
+    TARGET_LEARNING_RATE = 1e-4
     
     # --- 2. Data Pipeline ---
     print("\n--- Building Data Pipeline ---")

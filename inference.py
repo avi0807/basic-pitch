@@ -164,15 +164,17 @@ def perform_inference(audio_path, model_weights_path):
     
     # Process instrument prediction
     instrument_probs = predictions['instruments'][0]  # Remove batch dimension
-    predicted_instrument_idx = np.argmax(instrument_probs)
-    predicted_instrument = [key for key, value in INSTRUMENT_MAP.items() if value == predicted_instrument_idx][0]
-    confidence = instrument_probs[predicted_instrument_idx]
-    
-    predicted_instrument = list(INSTRUMENT_MAP.keys())[predicted_instrument_idx]
-    
-    print(f"\n=== Instrument Identification ===")
-    print(f"Predicted Instrument: {predicted_instrument}")
-    print(f"Confidence: {confidence:.2%}")
+    print("Predicting instrument...")
+    predicted_indices=np.where(instrument_probs>0.5)[0]
+    if len(predicted_indices)==0:
+        print("No instrument detected with high confidence")
+    else:
+        print("Detected Instruments:")
+        for idx in predicted_indices:
+            instrument_name = [key for key, value in INSTRUMENT_MAP.items() if value == idx][0]
+            confidence = instrument_probs[idx]
+            print(f" - {instrument_name} (Confidence: {confidence:.2%})")
+
     
     # Process note predictions (piano roll)
     note_probs = predictions['notes'][0]  # Remove batch dimension
