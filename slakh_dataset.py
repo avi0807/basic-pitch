@@ -25,6 +25,24 @@ def create_piano_roll(notes: list, n_frames: int, sr: int, hop_length: int, n_pi
             piano_roll[start_frame:end_frame, note_idx] = 1.0
     return piano_roll
 
+def create_onset_roll(notes: list, n_frames: int, sr: int, hop_length: int, n_pitches: int = 88, midi_offset: int = 21):
+    """Creates an onset roll matrix from a list of note events."""
+    onset_roll = np.zeros((n_frames, n_pitches), dtype=np.float32)
+    
+    for note in notes:
+        start_time = note['onset_sec']
+        pitch = note['pitch_midi']
+
+        # Calculate the single frame where the note starts
+        start_frame = int(np.floor(start_time * sr / hop_length))
+        
+        note_idx = pitch - midi_offset
+        if 0 <= note_idx < n_pitches and start_frame < n_frames:
+            # Mark only the single onset frame
+            onset_roll[start_frame, note_idx] = 1.0
+            
+    return onset_roll
+
 def load_slakh_track_data(track_path: str, sample_rate: int, duration: float, hop_length: int) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     mix_path = os.path.join(track_path, 'mix.flac')
     audio, sr = librosa.load(mix_path, sr=sample_rate, mono=True, duration=duration)
@@ -46,7 +64,8 @@ def load_slakh_track_data(track_path: str, sample_rate: int, duration: float, ho
     all_notes = [note for stem in metadata.get('stems', {}).values() for note in stem.get('notes', [])]
     
     note_matrix = create_piano_roll(all_notes, n_frames, sample_rate, hop_length)
-    onset_matrix = np.zeros_like(note_matrix) # Placeholder
+    onset_matrix = create_onset_roll(notes=all_notes, n_frames=n_frames, sr=sample_rate,
+                                     hop_length=hop_length,n_pitches=88,midi_offset=21)
     contour_matrix = np.zeros_like(note_matrix) # Placeholder simplified to 88 bins
 
     output_labels = {

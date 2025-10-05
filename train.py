@@ -3,12 +3,6 @@ import os
 import tensorflow as tf
 from slakh_dataset import SlakhDataset, INSTRUMENT_MAP
 
-# In train_simple.py
-
-# In train.py
-
-# Replace your old function with this one
-# In your training script (e.g., train.py)
 class  LearningRateWarmup(tf.keras.callbacks.Callback):
     def __init__(self, warmup_steps, initial_lr,target_lr):
         super(LearningRateWarmup, self).__init__()
@@ -30,9 +24,20 @@ def on_train_batch_begin(self, batch, logs=None):
             print(f"\nBatch {batch}: Learning rate is {current_lr:.7f}")
 
 
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+
+
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+
+
+# In final_train.py
 
 def build_model(input_shape, n_frames, n_pitches, n_instruments):
-    """Builds a medium-sized, multi-task model."""
+    """Builds the final two-stream model with a Conv-RNN instrument head."""
     
     inputs = tf.keras.layers.Input(shape=input_shape, name="input_audio")
     
@@ -40,33 +45,38 @@ def build_model(input_shape, n_frames, n_pitches, n_instruments):
     x = tf.keras.layers.Lambda(lambda a: tf.abs(tf.signal.stft(a, frame_length=1024, frame_step=256)))(inputs)
     x = tf.keras.layers.Lambda(lambda s: tf.expand_dims(s, axis=-1))(x)
     
-    # --- UPGRADED Shared Backbone ---
-    # Block 1
-    x = tf.keras.layers.Conv2D(32, (3, 3), activation='relu', padding='same')(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.MaxPooling2D((2, 2))(x)
-    x = tf.keras.layers.Dropout(0.25)(x) # Add Dropout for regularization
-
-    # Block 2
-    x = tf.keras.layers.Conv2D(64, (3, 3), activation='relu', padding='same')(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.MaxPooling2D((2, 2))(x)
-    x = tf.keras.layers.Dropout(0.25)(x) # Add Dropout for regularization
+    # --- Shared First Layer ---
+    # This layer extracts initial, high-resolution features
+    x_shared = tf.keras.layers.Conv2D(32, (3, 3), activation='relu', padding='same')(x)
+    x_shared = tf.keras.layers.BatchNormalization()(x_shared)
     
-    # Block 3 (NEW) - This adds more power to learn complex features
-    x = tf.keras.layers.Conv2D(128, (3, 3), activation='relu', padding='same')(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.MaxPooling2D((2, 2))(x)
-    x = tf.keras.layers.Dropout(0.25)(x) # Add Dropout for regularization
-
-    backbone_output = x
+    # ==========================================================
+    # --- Instrument Head (NEW Conv-RNN Version) ---
+    # ==========================================================
+    # Reshape the 2D feature map into a 1D sequence for the RNN
+    # The new shape is (batch, time_steps, features)
+    inst_head = tf.keras.layers.Reshape((-1, x_shared.shape[2] * x_shared.shape[3]))(x_shared)              # The GRU layer processes the sequence of features over time.
+                                                                                                            # It learns temporal patterns in the timbre.
+    inst_head = tf.keras.layers.GRU(64)(inst_head)
     
-    # --- Instrument Head (now more powerful) ---
-    inst_head = tf.keras.layers.GlobalAveragePooling2D()(backbone_output)
-    inst_head = tf.keras.layers.Dense(128, activation='relu')(inst_head) # Increased size
-    instrument_output = tf.keras.layers.Dense(n_instruments, activation='softmax', name='instruments')(inst_head)
+    # Final classification layer
+    instrument_output = tf.keras.layers.Dense(n_instruments, activation='sigmoid', name='instruments', dtype='float32')(inst_head)
     
-    # --- Transcription Head (connects to the new, deeper backbone) ---
+    # ==========================================================
+    # --- Deep Path and Transcription Head ---
+    # ==========================================================
+    x_deep = tf.keras.layers.MaxPooling2D((2, 2))(x_shared)
+    x_deep = tf.keras.layers.Dropout(0.25)(x_deep)
+    
+    x_deep = tf.keras.layers.Conv2D(64, (3, 3), activation='relu', padding='same')(x_deep)
+    x_deep = tf.keras.layers.BatchNormalization()(x_deep)
+    x_deep = tf.keras.layers.MaxPooling2D((2, 2))(x_deep)
+    x_deep = tf.keras.layers.Dropout(0.25)(x_deep)
+    
+    x_deep = tf.keras.layers.Conv2D(128, (3, 3), activation='relu', padding='same')(x_deep)
+    x_deep = tf.keras.layers.BatchNormalization()(x_deep)
+    backbone_output = tf.keras.layers.MaxPooling2D((2, 2))(x_deep)
+    
     tx_head = tf.keras.layers.Conv2DTranspose(128, (3, 3), strides=(2, 2), padding='same', activation='relu')(backbone_output)
     tx_head = tf.keras.layers.Conv2DTranspose(64, (3, 3), strides=(2, 2), padding='same', activation='relu')(tx_head)
     tx_head = tf.keras.layers.Conv2DTranspose(32, (3, 3), strides=(2, 2), padding='same', activation='relu')(tx_head)
@@ -78,6 +88,76 @@ def build_model(input_shape, n_frames, n_pitches, n_instruments):
     
     model_outputs = {"notes": notes_output, "onsets": onsets_output, "contours": contours_output, "instruments": instrument_output}
     return tf.keras.Model(inputs=inputs, outputs=model_outputs)
+
+
+# Example usage and model testing
+if __name__ == "__main__":
+    # Example parameters
+    input_shape = (16384,)  # 1D audio waveform
+    n_frames = 256          # Time resolution of output
+    n_pitches = 88          # Number of pitch bins (e.g., piano range)
+    n_instruments = 10      # Number of instrument classes
+    
+    # Build the model
+    model = build_model(input_shape, n_frames, n_pitches, n_instruments)
+    
+    # Display model summary
+    model.summary()
+    
+    # Verify output shapes
+    print("\n" + "="*50)
+    print("Output Shapes:")
+    print("="*50)
+    for output_name, output_tensor in model.output.items():
+        print(f"{output_name}: {output_tensor.shape}")
+    
+    # Example compilation (you can customize loss functions and weights)
+    model.compile(
+        optimizer='adam',
+        loss={
+            'notes': 'binary_crossentropy',
+            'onsets': 'binary_crossentropy', 
+            'contours': 'binary_crossentropy',
+            'instruments': 'categorical_crossentropy'
+        },
+        loss_weights={
+            'notes': 1.0,
+            'onsets': 1.0,
+            'contours': 1.0,
+            'instruments': 2.0  # Higher weight for instrument task
+        },
+        metrics={
+            'notes': ['accuracy'],
+            'onsets': ['accuracy'],
+            'contours': ['mae'],
+            'instruments': ['accuracy']
+        }
+    )
+
+
+# Example usage:
+if __name__ == "__main__":
+    # Define model parameters
+    SAMPLE_RATE = 16000
+    DURATION = 5  # seconds
+    INPUT_SHAPE = (SAMPLE_RATE * DURATION,)  # 80,000 samples
+    N_FRAMES = 312  # Number of time frames in output
+    N_PITCHES = 88  # Piano range (A0 to C8)
+    N_INSTRUMENTS = 10  # Number of instrument classes
+    
+    # Build the model
+    model = build_model(
+        input_shape=INPUT_SHAPE,
+        n_frames=N_FRAMES,
+        n_pitches=N_PITCHES,
+        n_instruments=N_INSTRUMENTS
+    )
+    
+    # Display model architecture
+    model.summary()
+    
+    # Optionally visualize model architecture
+    # keras.utils.plot_model(model, show_shapes=True, to_file='pitnet_model.png')
 
 def train():
     # --- 1. Parameters ---
@@ -115,8 +195,8 @@ def train():
     loss_weights = {
         "notes": 1.0,
         "onsets": 1.0,
-        "contours": 1.0,
-        "instruments": 1.0
+        "contours": 0.5,
+        "instruments": 3
     }
     
     optimizer = tf.keras.optimizers.Adam(learning_rate=TARGET_LEARNING_RATE,
@@ -128,7 +208,7 @@ def train():
             'notes': 'binary_crossentropy',
             'onsets': 'binary_crossentropy',
             'contours': 'binary_crossentropy',
-            'instruments': 'categorical_crossentropy',
+            'instruments': 'binary_crossentropy',
         },
         loss_weights=loss_weights, # <-- Add this argument
         metrics={

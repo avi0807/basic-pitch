@@ -148,3 +148,7 @@ junit.xml
 
 # intellij
 .idea/
+
+venv/
+__pycache__/
+*.weights.h5
